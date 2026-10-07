@@ -1,0 +1,13 @@
+{
+  "name": "@voxnova/sdk",
+  "version": "1.0.0",
+  "description": "SDK TypeScript de la plateforme développeurs VoxNova : API REST, instructions vocales (dial plan en code), vérification des webhooks",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "files": ["dist", "README.md"],
+  "scripts": { "build": "tsc -p tsconfig.json", "typecheck": "tsc --noEmit -p tsconfig.json" },
+  "engines": { "node": ">=18" },
+  "license": "MIT"
+}
