@@ -10,7 +10,10 @@ export class VoxNovaError extends Error {
 }
 
 export interface ClientOptions {
+  /** Clé d'entreprise vxk_… ou clé revendeur vxr_… */
   apiKey: string;
+  /** Clé revendeur uniquement : identifiant (ou identifiant court) du client au nom duquel agir (en-tête X-Organization). */
+  organization?: string;
   /** Adresse du panneau, ex. https://voip.example.com */
   baseUrl: string;
   /** Délai par requête (15 s par défaut). */
@@ -36,8 +39,11 @@ export interface Endpoint {
   createdAt: string;
   registered?: boolean;
   sip?: SipCredentials;
+  /** Configuration prête pour @voxnova/webphone (softphone navigateur) ; null si la passerelle WebRTC n'est pas activée. */
+  webphone?: WebphoneConfig | null;
   registrations?: Registration[];
 }
+export interface WebphoneConfig { wsServers: string[]; uri: string; authorizationUser: string; password: string; realm: string; displayName?: string; registerExpires?: number; iceServers?: { urls: string | string[]; username?: string; credential?: string }[] }
 export interface EndpointInput {
   number?: string;
   name: string;
@@ -54,23 +60,45 @@ export interface PhoneNumber { number: string; label: string; destType: string |
 export interface CallInput { to: string; applicationId: string; from?: string; url?: string; timeout?: number; vars?: Record<string, string | number | boolean> }
 export interface Page<T> { items: T[]; total: number; page: number }
 
+export type Json = Record<string, unknown>;
+export interface Sms { id: string; to: string; text: string; status: 'queued' | 'sent' | 'delivered' | 'failed'; providerStatus: string | null; messageId: string | null; sender: string | null; tag: string | null; type: 'transactional' | 'marketing' | null; segments: number; channel: string | null; error: string | null; createdAt: string; sentAt: string | null; deliveredAt: string | null; events?: { status: string; at: string }[] }
+export interface SmsInput { to: string; text: string; sender?: string; tag?: string; type?: 'transactional' | 'marketing'; channel?: 'sms' | 'whatsapp' | 'auto' }
+export interface SmsCredits { monthlyLimit: number; monthlyUsed: number; monthlyLeft: number; balance: number; available: number }
+export interface SmsPack { id: string; name: string; kind: 'MONTHLY' | 'LIFETIME'; credits: number; priceCents: number; active: boolean }
+export interface SmsPackInput { name: string; kind: 'MONTHLY' | 'LIFETIME'; credits: number; priceCents?: number; active?: boolean }
+export interface SenderBlock { id: string; kind: 'exact' | 'prefix' | 'contains'; value: string; reason: string }
+export interface SenderBlockInput { value: string; kind?: SenderBlock['kind']; reason?: string }
+export type WebhookEventName = 'call.completed' | 'sms.status';
+export interface Webhook { id: string; url: string; events: WebhookEventName[]; enabled: boolean; lastStatus: string | null; createdAt: string; secret?: string }
+export interface WebhookInput { url: string; events?: WebhookEventName[]; enabled?: boolean }
+export interface Flow { id: string; name: string; number: string | null; description: string; enabled: boolean; graph: { nodes: Json[]; edges: Json[] }; updatedAt?: string }
+export interface FlowInput { name: string; number?: string | null; description?: string; enabled?: boolean; graph: { nodes: Json[]; edges: Json[] } }
+export interface ClientInput { company: string; name: string; email: string; password: string; product?: string; trialDays?: number }
+
+const q = encodeURIComponent;
+
 export class VoxNova {
   private readonly base: string;
   private readonly f: typeof fetch;
 
   constructor(private readonly opts: ClientOptions) {
-    if (!opts.apiKey?.startsWith('vxk_')) throw new Error('Clé API vxk_… requise');
+    if (!opts.apiKey?.startsWith('vxk_') && !opts.apiKey?.startsWith('vxr_')) throw new Error('Clé API vxk_… (entreprise) ou vxr_… (revendeur) requise');
     this.base = opts.baseUrl.replace(/\/+$/, '');
     this.f = opts.fetch ?? fetch;
   }
 
-  /** Requête brute vers l'API (chemin commençant par /api/v1/). */
+  /** Revendeur : client agissant au nom d'un de vos clients (même clé vxr_, en-tête X-Organization). */
+  forOrganization(organization: string): VoxNova {
+    return new VoxNova({ ...this.opts, organization });
+  }
+
+  /** Requête brute vers l'API (chemin commençant par /api/). */
   async request<T>(method: string, path: string, body?: unknown, query?: Record<string, string | number | boolean | undefined>): Promise<T> {
     const qs = query ? Object.entries(query).filter(([, v]) => v !== undefined).map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`).join('&') : '';
     const isForm = typeof FormData !== 'undefined' && body instanceof FormData;
     const res = await this.f(`${this.base}${path}${qs ? `?${qs}` : ''}`, {
       method,
-      headers: { Authorization: `Bearer ${this.opts.apiKey}`, Accept: 'application/json', ...(body && !isForm ? { 'Content-Type': 'application/json' } : {}) },
+      headers: { Authorization: `Bearer ${this.opts.apiKey}`, Accept: 'application/json', ...(this.opts.organization ? { 'X-Organization': this.opts.organization } : {}), ...(body && !isForm ? { 'Content-Type': 'application/json' } : {}) },
       body: body === undefined ? undefined : isForm ? (body as FormData) : JSON.stringify(body),
       signal: AbortSignal.timeout(this.opts.timeoutMs ?? 15000),
     });
@@ -154,5 +182,90 @@ export class VoxNova {
 
   readonly logs = {
     list: (opts: { page?: number; pageSize?: number; callId?: string; applicationId?: string; errors?: boolean } = {}) => this.request<Page<Record<string, unknown>>>('GET', '/api/v1/logs', undefined, opts),
+  };
+
+  // ---------------------------------------------------------------- SMS
+  readonly sms = {
+    /** Met un SMS en file (statuts : webhook sms.status ou `get`). Refusé sans crédit ou si l'expéditeur est interdit. */
+    send: (input: SmsInput) => this.request<Sms>('POST', '/api/v1/sms', input),
+    list: (opts: { page?: number; pageSize?: number; status?: string; to?: string; tag?: string; since?: string } = {}) => this.request<Page<Sms>>('GET', '/api/v1/sms', undefined, opts),
+    /** Par identifiant ou messageId du fournisseur, avec les événements de remise (accepted, sent, delivered…). */
+    get: (id: string) => this.request<Sms>('GET', `/api/v1/sms/${q(id)}`),
+    /** Forfait du mois (remis à zéro chaque mois) et solde à vie. */
+    balance: () => this.request<SmsCredits>('GET', '/api/v1/sms/balance'),
+  };
+
+  /** Webhooks de l'entreprise : call.completed, sms.status (signés, voir `verifyWebhook`). */
+  readonly webhooks = {
+    list: () => this.request<Webhook[]>('GET', '/api/v1/webhooks'),
+    /** Le secret de signature n'est renvoyé qu'à la création. */
+    create: (input: WebhookInput) => this.request<Webhook>('POST', '/api/v1/webhooks', input),
+    update: (id: string, input: Partial<WebhookInput>) => this.request<Webhook>('PATCH', `/api/v1/webhooks/${q(id)}`, input),
+    delete: (id: string) => this.request<{ ok: true }>('DELETE', `/api/v1/webhooks/${q(id)}`),
+  };
+
+  // ---------------------------------------------------------------- panneau d'une entreprise (clé revendeur + organization)
+  /** Toute route du panneau (voir la documentation Swagger) : `vx.panel.get('/api/centrex/queues')`. */
+  readonly panel = {
+    get: <T = unknown>(path: string, query?: Record<string, string | number | boolean | undefined>) => this.request<T>('GET', path, undefined, query),
+    post: <T = unknown>(path: string, body?: unknown) => this.request<T>('POST', path, body ?? {}),
+    put: <T = unknown>(path: string, body?: unknown) => this.request<T>('PUT', path, body ?? {}),
+    patch: <T = unknown>(path: string, body?: unknown) => this.request<T>('PATCH', path, body ?? {}),
+    delete: <T = unknown>(path: string) => this.request<T>('DELETE', path),
+  };
+
+  private crud<T = Json, I = Json>(base: string, update: 'PUT' | 'PATCH' = 'PUT') {
+    return {
+      list: () => this.request<T[]>('GET', base),
+      create: (input: I) => this.request<T>('POST', base, input),
+      update: (id: string, input: Partial<I>) => this.request<T>(update, `${base}/${q(id)}`, input),
+      delete: (id: string) => this.request<{ ok: true }>('DELETE', `${base}/${q(id)}`),
+    };
+  }
+
+  /** Utilisateurs de l'entreprise (invitation par e-mail, droits). */
+  readonly users = { ...this.crud('/api/org/users', 'PATCH'), invite: (id: string) => this.request<Json>('POST', `/api/org/users/${q(id)}/invite`, {}), permissions: (id: string, permissions: string[]) => this.request<Json>('PUT', `/api/org/users/${q(id)}/permissions`, { permissions }) };
+  /** Postes (extensions) : création, modification complète, mot de passe SIP, état d'enregistrement. */
+  readonly extensions = { ...this.crud('/api/org/extensions'), sipAccount: (id: string) => this.request<Json>('GET', `/api/org/extensions/${q(id)}/sip-account`), resetSipPassword: (id: string) => this.request<Json>('POST', `/api/org/extensions/${q(id)}/sip-password`, {}), status: (id: string) => this.request<Json>('GET', `/api/org/extensions/${q(id)}/status`) };
+  /** Scénarios d'appel (flow) : graphe de blocs, validation et simulation sans appel réel. */
+  readonly flows = {
+    list: () => this.request<Pick<Flow, 'id' | 'name' | 'number' | 'description' | 'enabled'>[]>('GET', '/api/centrex/flows'),
+    get: (id: string) => this.request<Flow>('GET', `/api/centrex/flows/${q(id)}`),
+    create: (input: FlowInput) => this.request<Flow>('POST', '/api/centrex/flows', input),
+    update: (id: string, input: Partial<FlowInput>) => this.request<Flow>('PUT', `/api/centrex/flows/${q(id)}`, input),
+    delete: (id: string) => this.request<{ ok: true }>('DELETE', `/api/centrex/flows/${q(id)}`),
+    validate: (graph: Flow['graph']) => this.request<{ errors: string[]; warnings: string[] }>('POST', '/api/centrex/flows/validate', { graph }),
+    simulate: (graph: Flow['graph'], opts: { caller?: string; did?: string; digits?: string[] } = {}) => this.request<Json>('POST', '/api/centrex/flows/simulate', { graph, ...opts }),
+  };
+  readonly queues = this.crud('/api/centrex/queues');
+  readonly ringGroups = this.crud('/api/centrex/ring-groups');
+  readonly ivr = this.crud('/api/centrex/ivr');
+  readonly timeConditions = this.crud('/api/centrex/time-conditions');
+  readonly conferences = this.crud('/api/centrex/conferences');
+
+  // ---------------------------------------------------------------- revendeur (clé vxr_)
+  readonly reseller = {
+    me: () => this.request<Json>('GET', '/api/reseller/me'),
+    clients: {
+      list: (search?: string) => this.request<Json[]>('GET', '/api/reseller/clients', undefined, { q: search }),
+      get: (id: string) => this.request<Json>('GET', `/api/reseller/clients/${q(id)}`),
+      create: (input: ClientInput) => this.request<Json>('POST', '/api/reseller/clients', input),
+      /** Suspension, réactivation, prolongation d'essai. */
+      update: (id: string, input: { status?: 'ACTIVE' | 'SUSPENDED'; extendTrialDays?: number }) => this.request<Json>('PATCH', `/api/reseller/clients/${q(id)}`, input),
+      subscribe: (id: string, input: Json) => this.request<Json>('POST', `/api/reseller/clients/${q(id)}/subscription`, input),
+      sms: (id: string) => this.request<{ credits: SmsCredits; blocks: SenderBlock[] }>('GET', `/api/reseller/clients/${q(id)}/sms`),
+      /** MONTHLY remplace le forfait mensuel ; LIFETIME ajoute au solde à vie. */
+      applySmsPack: (id: string, packId: string) => this.request<SmsCredits>('POST', `/api/reseller/clients/${q(id)}/sms/pack`, { packId }),
+      blockSender: (id: string, input: SenderBlockInput) => this.request<SenderBlock>('POST', `/api/reseller/clients/${q(id)}/sms/sender-blocks`, input),
+    },
+    catalog: () => this.request<Json>('GET', '/api/reseller/catalog'),
+    plans: this.crud('/api/reseller/plans'),
+    invoices: { list: () => this.request<Json[]>('GET', '/api/reseller/invoices'), validate: (id: string, input: Json = {}) => this.request<Json>('POST', `/api/reseller/invoices/${q(id)}/validate`, input), cancel: (id: string, input: Json = {}) => this.request<Json>('POST', `/api/reseller/invoices/${q(id)}/cancel`, input) },
+    smsPacks: this.crud<SmsPack, SmsPackInput>('/api/reseller/sms/packs'),
+    senderBlocks: { list: () => this.request<SenderBlock[]>('GET', '/api/reseller/sms/sender-blocks'), create: (input: SenderBlockInput) => this.request<SenderBlock>('POST', '/api/reseller/sms/sender-blocks', input), delete: (id: string) => this.request<{ ok: true }>('DELETE', `/api/reseller/sms/sender-blocks/${q(id)}`) },
+    /** SMS de tous vos clients. */
+    sms: (opts: { orgId?: string; status?: string; page?: number } = {}) => this.request<{ total: number; items: Json[] }>('GET', '/api/reseller/sms', undefined, opts),
+    /** Webhooks recevant les événements de tous vos clients (sms.status). */
+    webhooks: { list: () => this.request<Webhook[]>('GET', '/api/reseller/webhooks'), create: (input: { url: string; events?: 'sms.status'[]; enabled?: boolean }) => this.request<Webhook>('POST', '/api/reseller/webhooks', input), update: (id: string, input: Partial<WebhookInput>) => this.request<Webhook>('PATCH', `/api/reseller/webhooks/${q(id)}`, input), delete: (id: string) => this.request<{ ok: true }>('DELETE', `/api/reseller/webhooks/${q(id)}`) },
   };
 }
