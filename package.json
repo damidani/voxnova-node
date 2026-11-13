@@ -1,6 +1,6 @@
 {
   "name": "@voxnova/sdk",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "SDK TypeScript de la plateforme VoxNova : API REST (SMS, endpoints, numéros, appels, scénarios d'appel, espace revendeur), instructions vocales, vérification des webhooks",
   "type": "module",
   "main": "dist/index.js",
@@ -26,8 +26,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/damidani/voxnova.git",
-    "directory": "packages/sdk"
+    "url": "git+https://github.com/damidani/voxnova-node.git"
   },
   "keywords": [
     "voip",
@@ -36,5 +35,9 @@
     "webhooks",
     "ivr",
     "voxnova"
-  ]
+  ],
+  "homepage": "https://github.com/damidani/voxnova-node#readme",
+  "bugs": {
+    "url": "https://github.com/damidani/voxnova-node/issues"
+  }
 }
